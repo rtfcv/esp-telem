@@ -1,3 +1,5 @@
+// #define LOG_LOCAL_LEVEL ESP_LOG_WARN
+
 #include "nvs_flash.h"
 #include "esp_wifi.h"
 #include "esp_now.h"
@@ -8,25 +10,50 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mymac.h"
+#include "driver/uart.h"
+#include "driver/gpio.h"
 
 // dummy max delay
 #define ESPNOW_MAXDELAY 10*portMAX_DELAY
 #define BUFFER_SIZE 250 // max of 250 bytes
 
+// works on esp32c6 for now.
+#define UART_PORT UART_NUM_1
+#define TX_PIN 16
+#define RX_PIN 17
+#define BUF_SIZE 1024 // serial buffer size
+
 typedef struct {
     uint8_t buffer[BUFFER_SIZE];
+    size_t  size;  //should be max of 250
 } espnow_queue_t;
 
 typedef struct {
     uint8_t buffer[BUFFER_SIZE];
+    size_t  size;  //should be max of 250
 } serial_queue_t;
 
 static const char *TAG = "MAIN";
 static QueueHandle_t my_espnow_send_queue = NULL;
 static QueueHandle_t my_serial_send_queue = NULL;
 static const uint8_t dest_addr[] = MY_DEST_MAC_ADDR;
+static QueueHandle_t uart_queue = NULL;
 
+void serial_setup(void){
+    uart_config_t config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity    = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE
+    };
 
+    uart_param_config(UART_PORT, &config);
+    uart_set_pin(UART_PORT, TX_PIN, RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    uart_driver_install(UART_PORT, BUF_SIZE, BUF_SIZE, 20, &uart_queue, 0);
+}
+
+// print debug info
 void my_esp_now_info(void *args){
     // --- OPTIONAL: Read ESP-NOW version ---
     uint32_t version = 0;
@@ -42,6 +69,7 @@ void my_esp_now_info(void *args){
     }
 }
 
+// taskt to send dummy_data through espnow
 void dummy_data(void *args){ 
     const static uint8_t data[] = "hello_world";
     for(;;){
@@ -51,29 +79,61 @@ void dummy_data(void *args){
     }
 }
 
-void my_add_peer(){
-    esp_now_peer_info_t peer = {0};
-    memcpy(peer.peer_addr, dest_addr, 6);
-    peer.channel = 0;          // 0 = current WiFi channel
-    peer.ifidx = WIFI_IF_STA;
-    peer.encrypt = false;
-    esp_err_t add_status = esp_now_add_peer(&peer);
-    ESP_LOGI(TAG, "add_peer: %s", esp_err_to_name(add_status));
+void recv_serial(void *pvParameters)
+{
+    // read serial and add contents to espnow queue
+    uart_event_t event;
+    uint8_t* data = malloc(BUF_SIZE);
+    espnow_queue_t buffer;
+
+    while (1) {if (xQueueReceive(uart_queue, &event, portMAX_DELAY)) {
+        switch (event.type) {
+            case UART_DATA:
+                int len = uart_read_bytes(UART_PORT, data, event.size, portMAX_DELAY);
+                ESP_LOGI(TAG, "RX: %.*s", event.size, data);
+                int offset = 0;
+                int chunk_size = BUFFER_SIZE;
+                while (offset < len) {
+                    // 最後のチャンクは event.size より小さい可能性がある
+                    if (chunk_size > len - offset) {chunk_size = len - offset;}
+
+                    // buffer.buffer に chunk_size 分コピー
+                    memcpy(buffer.buffer, data + offset, chunk_size);
+                    buffer.size = chunk_size;
+
+                    // キューに送信
+                    xQueueSend(my_espnow_send_queue, &buffer, ESPNOW_MAXDELAY);
+                    offset += chunk_size;
+                }
+                break;
+
+            case UART_FIFO_OVF:
+                ESP_LOGW(TAG, "HW FIFO Overflow");
+                uart_flush_input(UART_PORT);
+                xQueueReset(uart_queue);
+                break;
+
+            case UART_BUFFER_FULL:
+                ESP_LOGW(TAG, "Ring buffer full");
+                uart_flush_input(UART_PORT);
+                xQueueReset(uart_queue);
+                break;
+
+            default:
+                ESP_LOGI(TAG, "UART event type: %d", event.type);
+                break;
+        }
+    }}
+    free(data);
 }
 
-void recv_serial(void *args){
-    // read serial and add contents to espnow queue
-    espnow_queue_t buffer;
-    strcpy((char*)buffer.buffer, "");
-    // divide serial buffer into esp queue
-    xQueueSend(my_espnow_send_queue, &buffer, ESPNOW_MAXDELAY);
-}
 void send_serial(void *args){
     // read serial queue and relay its contents to serial tx
     serial_queue_t buffer;
     // my_serial_send_queue should not be NULL...
     while(xQueueReceive(my_serial_send_queue, &buffer, portMAX_DELAY) == pdTRUE){
-        ESP_LOGI(TAG, "%s", buffer.buffer);
+        ESP_LOGI(TAG, "%.*s", buffer.size, buffer.buffer);
+        uart_write_bytes(UART_PORT, buffer.buffer, buffer.size);
     }
 }
 
@@ -82,7 +142,8 @@ void recv_espnow(const esp_now_recv_info_t *info, const uint8_t *incomingData, i
 
     ESP_LOGI(TAG, "receiving data");
     serial_queue_t buffer;
-    memcpy(&(buffer.buffer), incomingData, BUFFER_SIZE);
+    memcpy(&(buffer.buffer), incomingData, len);
+    buffer.size = len;
     // Serial.write(buf_recv, len);
     // divide serial buffer into esp queue
     xQueueSend(my_serial_send_queue, &buffer, ESPNOW_MAXDELAY);
@@ -92,10 +153,10 @@ void send_espnow(void *args){
     espnow_queue_t buffer;
     // my_espnow_send_queue should not be NULL...
     while(xQueueReceive(my_espnow_send_queue, &buffer, portMAX_DELAY) == pdTRUE){
-        ESP_LOGI(TAG, "dummy");
+        esp_err_t result = esp_now_send(dest_addr, (uint8_t *) &(buffer.buffer), buffer.size);
+        ESP_LOGI(TAG, "sending data whose result was: %s", esp_err_to_name(result));
     }
 }
-
 
 void my_setup(void){
     // --- REQUIRED: Initialize NVS ---
@@ -122,20 +183,33 @@ void my_setup(void){
     ESP_ERROR_CHECK(esp_now_init());
     ESP_LOGI(TAG, "ESP-NOW initialized");
 
-    //
-    my_add_peer();
+    // --- REQUIRED: add peer ---
+    esp_now_peer_info_t peer = {0};
+    memcpy(peer.peer_addr, dest_addr, 6);
+    peer.channel = 0;          // 0 = current WiFi channel
+    peer.ifidx = WIFI_IF_STA;
+    peer.encrypt = false;
+    ESP_ERROR_CHECK(esp_now_add_peer(&peer));
+    /*
+    esp_err_t add_status = esp_now_add_peer(&peer);
+    ESP_LOGI(TAG, "add_peer: %s", esp_err_to_name(add_status));
+    */
 
     // xQueueCreate(ESPNOW_QUEUE_SIZE, sizeof(example_espnow_event_t));
     my_espnow_send_queue = xQueueCreate(6, sizeof(espnow_queue_t));
     my_serial_send_queue = xQueueCreate(6, sizeof(serial_queue_t));
     
-    esp_now_register_recv_cb(recv_espnow);
 }
 
 void app_main(void)
 {
     my_setup();
+    serial_setup();
     xTaskCreate(my_esp_now_info, "my_esp_now_info", 2048, NULL, 4, NULL);
-    xTaskCreate(dummy_data, "dummy_data", 2048, NULL, 4, NULL);
-    xTaskCreate(send_serial, "send_serial", 2048, NULL, 4, NULL);
+
+    xTaskCreate(send_espnow, "send_espnow", 2048, NULL, 4, NULL);
+    esp_now_register_recv_cb(recv_espnow);
+
+    xTaskCreate(send_serial, "send_serial", 1024, NULL, 4, NULL);
+    xTaskCreate(recv_serial, "uart_event_task", 4096, NULL, 12, NULL);
 }
