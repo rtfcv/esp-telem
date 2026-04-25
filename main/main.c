@@ -4,10 +4,49 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+typedef struct {
+} espnow_queue_t;
+
+typedef struct {
+} serial_queue_t;
+
 static const char *TAG = "MAIN";
+static QueueHandle_t my_espnow_send_queue = NULL;
+static QueueHandle_t my_serial_send_queue = NULL;
+
+
+void my_esp_now_info(void *args){
+    // --- OPTIONAL: Read ESP-NOW version ---
+    uint32_t version = 0;
+    esp_now_get_version(&version);
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA); 
+
+    for(;;){
+        ESP_LOGI(TAG, "ESP-NOW version: %u", version);
+        ESP_LOGI("MAC", "MAC: %02x:%02x:%02x:%02x:%02x:%02x", 
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        vTaskDelay(2000 / portTICK_PERIOD_MS); 
+    }
+}
+
+void recv_serial(void *args){
+    // read serial
+    // add to queue
+}
+void send_serial(void *args){
+    // xQueueReceive(my_serial_send_queue, &evt, portMAX_DELAY) == pdTRUE
+}
+
+
+void recv_espnow(void *args){
+}
+void send_espnow(void *args){
+}
 
 void app_main(void)
 {
@@ -35,13 +74,5 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_now_init());
     ESP_LOGI(TAG, "ESP-NOW initialized");
 
-    // --- OPTIONAL: Read ESP-NOW version ---
-    uint32_t version = 0;
-    esp_now_get_version(&version);
-
-    // Loop to show it's alive
-    while (1) {
-        ESP_LOGI(TAG, "ESP-NOW version: %u", version);
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-    }
+   xTaskCreate(my_esp_now_info, "my_esp_now_info", 2048, NULL, 4, NULL);
 }
