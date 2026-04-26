@@ -1,4 +1,4 @@
-// #define LOG_LOCAL_LEVEL ESP_LOG_WARN
+#define LOG_LOCAL_LEVEL ESP_LOG_WARN
 
 #include "nvs_flash.h"
 #include "esp_wifi.h"
@@ -36,12 +36,15 @@ typedef struct {
 static const char *TAG = "MAIN";
 static QueueHandle_t my_espnow_send_queue = NULL;
 static QueueHandle_t my_serial_send_queue = NULL;
-static const uint8_t dest_addr[] = MY_DEST_MAC_ADDR;
+static uint8_t dest_addr[] = { 0, 0, 0, 0, 0, 0 };
+static const uint8_t dest_addr1[] = MY_DEST_MAC_ADDR1;
+static const uint8_t dest_addr2[] = MY_DEST_MAC_ADDR2;
 static QueueHandle_t uart_queue = NULL;
 
 void serial_setup(void){
     uart_config_t config = {
-        .baud_rate = 115200,
+        // .baud_rate = 115200,
+        .baud_rate = 57600,
         .data_bits = UART_DATA_8_BITS,
         .parity    = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
@@ -69,16 +72,6 @@ void my_esp_now_info(void *args){
     }
 }
 
-// taskt to send dummy_data through espnow
-void dummy_data(void *args){ 
-    const static uint8_t data[] = "hello_world";
-    for(;;){
-        esp_err_t result = esp_now_send(dest_addr, (uint8_t *) &data, sizeof(data));
-        ESP_LOGI(TAG, "sending data whose result was: %s", esp_err_to_name(result));
-        vTaskDelay(2000 / portTICK_PERIOD_MS); 
-    }
-}
-
 void recv_serial(void *pvParameters)
 {
     // read serial and add contents to espnow queue
@@ -94,14 +87,11 @@ void recv_serial(void *pvParameters)
                 int offset = 0;
                 int chunk_size = BUFFER_SIZE;
                 while (offset < len) {
-                    // 最後のチャンクは event.size より小さい可能性がある
                     if (chunk_size > len - offset) {chunk_size = len - offset;}
 
-                    // buffer.buffer に chunk_size 分コピー
                     memcpy(buffer.buffer, data + offset, chunk_size);
                     buffer.size = chunk_size;
 
-                    // キューに送信
                     xQueueSend(my_espnow_send_queue, &buffer, ESPNOW_MAXDELAY);
                     offset += chunk_size;
                 }
@@ -126,7 +116,6 @@ void recv_serial(void *pvParameters)
     }}
     free(data);
 }
-
 void send_serial(void *args){
     // read serial queue and relay its contents to serial tx
     serial_queue_t buffer;
@@ -137,15 +126,16 @@ void send_serial(void *args){
     }
 }
 
-void recv_espnow(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len){
-    // callback for espnow recieving event
 
+void recv_espnow(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len){
+    /** 
+     * callback for espnow recieving event
+    */
     ESP_LOGI(TAG, "receiving data");
     serial_queue_t buffer;
     memcpy(&(buffer.buffer), incomingData, len);
     buffer.size = len;
-    // Serial.write(buf_recv, len);
-    // divide serial buffer into esp queue
+    // forward the data to serial tx
     xQueueSend(my_serial_send_queue, &buffer, ESPNOW_MAXDELAY);
 }
 void send_espnow(void *args){
@@ -157,6 +147,7 @@ void send_espnow(void *args){
         ESP_LOGI(TAG, "sending data whose result was: %s", esp_err_to_name(result));
     }
 }
+
 
 void my_setup(void){
     // --- REQUIRED: Initialize NVS ---
@@ -185,6 +176,13 @@ void my_setup(void){
 
     // --- REQUIRED: add peer ---
     esp_now_peer_info_t peer = {0};
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA); 
+    if(mac[0] == dest_addr1[0]) {
+        memcpy(dest_addr, dest_addr2, 6);
+    }else if(mac[0] == dest_addr2[0]){
+        memcpy(dest_addr, dest_addr1, 6);
+    } 
     memcpy(peer.peer_addr, dest_addr, 6);
     peer.channel = 0;          // 0 = current WiFi channel
     peer.ifidx = WIFI_IF_STA;
@@ -205,7 +203,7 @@ void app_main(void)
 {
     my_setup();
     serial_setup();
-    xTaskCreate(my_esp_now_info, "my_esp_now_info", 2048, NULL, 4, NULL);
+    // xTaskCreate(my_esp_now_info, "my_esp_now_info", 2048, NULL, 4, NULL);
 
     xTaskCreate(send_espnow, "send_espnow", 2048, NULL, 4, NULL);
     esp_now_register_recv_cb(recv_espnow);
