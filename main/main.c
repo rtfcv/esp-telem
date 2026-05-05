@@ -1,4 +1,4 @@
-#define LOG_LOCAL_LEVEL ESP_LOG_WARN
+#define LOG_LOCAL_LEVEL ESP_LOG_ERROR
 
 #include "nvs_flash.h"
 #include "esp_wifi.h"
@@ -9,9 +9,10 @@
 #include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "mymac.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
+
+#include "mymac.h"
 
 // dummy max delay
 #define ESPNOW_MAXDELAY 10*portMAX_DELAY
@@ -37,14 +38,12 @@ static const char *TAG = "MAIN";
 static QueueHandle_t my_espnow_send_queue = NULL;
 static QueueHandle_t my_serial_send_queue = NULL;
 static uint8_t dest_addr[] = { 0, 0, 0, 0, 0, 0 };
-static const uint8_t dest_addr1[] = MY_DEST_MAC_ADDR1;
-static const uint8_t dest_addr2[] = MY_DEST_MAC_ADDR2;
 static QueueHandle_t uart_queue = NULL;
 
 void serial_setup(void){
     uart_config_t config = {
-        // .baud_rate = 115200,
-        .baud_rate = 57600,
+        .baud_rate = 115200,
+        // .baud_rate = 57600,
         .data_bits = UART_DATA_8_BITS,
         .parity    = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
@@ -176,6 +175,8 @@ void my_setup(void){
 
     // --- REQUIRED: add peer ---
     esp_now_peer_info_t peer = {0};
+    static const uint8_t dest_addr1[] = MY_DEST_MAC_ADDR1;
+    static const uint8_t dest_addr2[] = MY_DEST_MAC_ADDR2;
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA); 
     if(mac[0] == dest_addr1[0]) {
